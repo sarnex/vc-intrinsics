@@ -152,6 +152,7 @@ for i in range(len(parse)):
             Intrinsics.update(module.Imported_Intrinsics)
 
 
+
 def ik_compare(ikl, ikr):
   ikl = ikl.replace("_",".")
   ikr = ikr.replace("_",".")
@@ -422,7 +423,7 @@ def addAnyTypes(value,argNum):
     if "any:" in value:
         default_value = value[4:] #get the default value encoded after the "any" type
         value = "any"
-
+    
     # LLVM 23+ changed the bit packing scheme for overloaded types
     # Old: (argNum << 3) | anyKind  - argument number in upper bits
     # New: (anyKind << 5) | argNum  - overload index in lower 5 bits, kind in upper 3 bits
