@@ -686,9 +686,15 @@ bool CMSimdCFLower::findSimdBranches(unsigned CMWidth)
   bool found = false;
   for (auto fi = F->begin(), fe = F->end(); fi != fe; ++fi) {
     BasicBlock *BB = &*fi;
+#if VC_INTR_LLVM_VERSION_MAJOR >= 23
     auto Br = dyn_cast<CondBrInst>(BB->getTerminator());
     if (!Br)
       continue;
+#else
+    auto Br = dyn_cast<BranchInst>(BB->getTerminator());
+    if (!Br || !Br->isConditional())
+      continue;
+#endif
     if (auto SimdCondUse = getSimdConditionUse(Br->getCondition())) {
       unsigned SimdWidth = VCINTR::VectorType::getNumElements(
           cast<VectorType>((*SimdCondUse)->getType()));
@@ -771,7 +777,11 @@ void CMSimdCFLower::markPredicatedBranches()
     auto BB = pbi->first;
     unsigned SimdWidth = pbi->second;
     auto Term = BB->getTerminator();
+#if VC_INTR_LLVM_VERSION_MAJOR >= 23
     if (!isa<CondBrInst>(Term) && !isa<UncondBrInst>(Term))
+#else
+    if (!isa<BranchInst>(Term))
+#endif
       DiagnosticInfoSimdCF::emit(Term, "return or switch not allowed in SIMD control flow");
     if (!SimdBranches[BB])
       LLVM_DEBUG(dbgs() << "branch at " << BB->getName() << " becomes simd\n");
@@ -814,7 +824,11 @@ void CMSimdCFLower::fixSimdBranches()
       BasicBlock *Succ = Br->getSuccessor(si);
       if (Seen.find(Succ) != Seen.end()) {
         LLVM_DEBUG(dbgs() << "simd branch at " << BB->getName() << " succ " << si << " is backward\n");
+#if VC_INTR_LLVM_VERSION_MAJOR >= 23
         if (!isa<CondBrInst>(Br)) {
+#else
+        if (!cast<BranchInst>(Br)->isConditional()) {
+#endif
           // Unconditional simd backward branch. We can just remove its simdness.
           LLVM_DEBUG(dbgs() << " unconditional, so unsimding\n");
           SimdBranches.erase(SimdBranches.find(BB));
@@ -824,7 +838,11 @@ void CMSimdCFLower::fixSimdBranches()
           auto NextBB = BB->getNextNode();
           auto NewBB = BasicBlock::Create(BB->getContext(),
                 BB->getName() + ".backward", BB->getParent(), NextBB);
+#if VC_INTR_LLVM_VERSION_MAJOR >= 23
           UncondBrInst::Create(Succ, NewBB)->setDebugLoc(Br->getDebugLoc());
+#else
+          BranchInst::Create(Succ, NewBB)->setDebugLoc(Br->getDebugLoc());
+#endif
           Br->setSuccessor(si, NewBB);
           fixPHIInput(Succ, BB, NewBB);
         }
@@ -838,12 +856,21 @@ void CMSimdCFLower::fixSimdBranches()
             Succ->getUniquePredecessor() == nullptr) {
           auto NewBB = BasicBlock::Create(BB->getContext(),
             BB->getName() + ".loopend", BB->getParent(), Succ);
+#if VC_INTR_LLVM_VERSION_MAJOR >= 23
           UncondBrInst::Create(Succ, NewBB)->setDebugLoc(Br->getDebugLoc());
+#else
+          BranchInst::Create(Succ, NewBB)->setDebugLoc(Br->getDebugLoc());
+#endif
           Br->setSuccessor(si, NewBB);
         }
       }
     }
+#if VC_INTR_LLVM_VERSION_MAJOR >= 23
     if (auto CondBr = dyn_cast<CondBrInst>(Br)) {
+#else
+    auto CondBr = dyn_cast<BranchInst>(Br);
+    if (CondBr && CondBr->isConditional()) {
+#endif
       // Ensure that the false leg is fallthrough.
       auto NextBB = BB->getNextNode();
       if (CondBr->getSuccessor(1) != NextBB) {
@@ -855,7 +882,11 @@ void CMSimdCFLower::fixSimdBranches()
           auto NewBB = BasicBlock::Create(BB->getContext(),
                 BB->getName() + ".fallthrough", BB->getParent(), NextBB);
           PredicatedBlocks[NewBB] = PredicatedBlocks[CondBr->getSuccessor(0)];
+#if VC_INTR_LLVM_VERSION_MAJOR >= 23
           UncondBrInst::Create(Succ, NewBB)->setDebugLoc(CondBr->getDebugLoc());
+#else
+          BranchInst::Create(Succ, NewBB)->setDebugLoc(CondBr->getDebugLoc());
+#endif
           CondBr->setSuccessor(1, NewBB);
           fixPHIInput(Succ, BB, NewBB);
         } else {
@@ -999,7 +1030,11 @@ void CMSimdCFLower::determineJIPs()
       auto Br = BB->getTerminator();
       BasicBlock *UIP = Br->getSuccessor(0);
       BasicBlock *JIP = JIPs[BB];
+#if VC_INTR_LLVM_VERSION_MAJOR >= 23
       if (!isa<CondBrInst>(Br) && (!JIP || UIP == JIP)) {
+#else
+      if (!cast<BranchInst>(Br)->isConditional() && (!JIP || UIP == JIP)) {
+#endif
         LLVM_DEBUG(dbgs() << BB->getName() << ": converting back to unconditional branch to " << UIP->getName() << "\n");
         BranchesToUnsimd.push_back(BB);
       } else
@@ -1697,8 +1732,13 @@ void CMSimdCFLower::lowerSimdCF()
     BasicBlock *UIP = Term->getSuccessor(0);
     BasicBlock *JIP = JIPs[BB];
     LLVM_DEBUG(dbgs() << "lower branch at " << BB->getName() << ", UIP=" << UIP->getName() << ", JIP=" << JIP->getName() << "\n");
+#if VC_INTR_LLVM_VERSION_MAJOR >= 23
     CondBrInst *Br = dyn_cast<CondBrInst>(Term);
     if (!Br) {
+#else
+    BranchInst *Br = cast<BranchInst>(Term);
+    if (!Br->isConditional()) {
+#endif
       // Unconditional branch.  Turn it into a conditional branch on true,
       // adding a fallthrough on false.
       auto NewBr = Builder.CreateCondBr(
@@ -1810,13 +1850,23 @@ void CMSimdCFLower::lowerSimdCF()
       // own block. It needs to be turned into a conditional branch to JIP,
       // with the condition from llvm.genx.simdcf.join.
       auto Br = JP->getTerminator();
+#if VC_INTR_LLVM_VERSION_MAJOR >= 23
       assert(isa<UncondBrInst>(Br));
       auto NewBr = CondBrInst::Create(BranchCond, JIP, JP->getNextNode(), Br);
+#else
+      assert(!cast<BranchInst>(Br)->isConditional());
+      auto NewBr = BranchInst::Create(JIP, JP->getNextNode(), BranchCond, Br);
+#endif
       assert(JoinToGoto.count(JP));
       NewBr->setDebugLoc(DL);
       eraseInstruction(Br);
       auto *OrigBranch = JoinToGoto.at(JP)->getTerminator();
+#if VC_INTR_LLVM_VERSION_MAJOR >= 23
       if (auto *OrigCondBr = dyn_cast<CondBrInst>(OrigBranch))
+#else
+      auto *OrigCondBr = cast<BranchInst>(OrigBranch);
+      if (OrigCondBr->isConditional())
+#endif
         fixPHIInput(JIP,
                     (OrigCondBr->getSuccessor(0) == JP
                          ? OrigCondBr->getSuccessor(1)
@@ -2026,3 +2076,4 @@ void DiagnosticInfoSimdCF::emit(Instruction *Inst, StringRef Msg,
                            Inst->getDebugLoc(), Msg);
   Inst->getContext().diagnose(Err);
 }
+
